@@ -2,6 +2,9 @@ import dash
 import dash_core_components as dcc
 import dash_html_components as html
 from dash.dependencies import Input, Output, State
+
+import sys
+sys.path.append("./pySQLGen")
 from pysqlgen.apputils import app_state_to_opts
 
 # --------- "GLOBALS" -------------------------------------------------
