@@ -1,5 +1,8 @@
+import copy
+from .utils import *
 from .dbtree import *
 from warnings import warn
+
 
 class UserOption:
     """
@@ -10,20 +13,50 @@ class UserOption:
     list of options for these, the underlying table as a SchemaNode, and
     the DBMetadata context for all of this.
     """
-    def __init__(self, item, sql_item, transformations, default_transformation, table,
-                 context, field_alias=None, verbose=True):
-        assert isinstance(table, SchemaNode) or (table.title() == "Custom"), \
-            "Please ensure the table is a SchemaNode object or the string 'custom'."
-        assert (table == 'custom') or (table in context.nodes), \
-            f"Specified table '{table}' is not available in 'context'."
-        assert (default_transformation is None) or \
-               (default_transformation in transformations), \
-            "default transformation must be in list of possible transformations."
+    def __init__(self, item, sql_item,
+                 table, context,
+                 transformations=[None], aggregations=[None],
+                 default_transformation=None, default_aggregation=None,
+                 field_alias=None, sql_where=None,
+                 dimension_table=None, perform_lkp=False, lkp_field=None,
+                 verbose=True):
         assert isinstance(context, DBMetadata), "context is not a DBContext object"
+        assert is_node(table, allow_custom=True), \
+            "Please ensure the table is a SchemaNode object or the string 'custom'."
+        assert node_isin_context(table, context, allow_custom=True), \
+            f"Specified table '{table}' is not available in 'context'."
+        assert in_list(default_transformation, transformations, allow_None=True),\
+            "default transformation must be in list of possible transformations."
+        assert in_list(default_aggregation, aggregations, allow_None=True), \
+            "default aggregation must be in list of possible aggregations."
+        assert node_isin_context(dimension_table, context, allow_None=True), \
+            f"Specified dimension table '{table}' is not available in 'context'."
 
-        if verbose and (sql_item.find('{alias') < 0):
-            warn(f"No table alias placeholder found for {item} " + \
-                 "(expecting e.g. '{alias}field_name')")
+        assert all([(t is None) or (t.lower() in context.TRANSFORMATIONS)
+                    for t in transformations]), \
+            "Please ensure the transformations are a subset of (" + \
+            ", ".join(context.TRANSFORMATIONS) + ")."
+        assert all([(a is None) or (a.lower() in context.AGGREGATIONS)
+                    for a in aggregations]), \
+            "Please ensure the aggregations are a subset of (" + \
+            ", ".join(context.AGGREGATIONS) + ")."
+
+        if dimension_table is not None:
+            sql_item_proc = rm_alias_placeholder(sql_item.strip())
+            assert re.fullmatch('[A-Za-z0-9_.]+', sql_item_proc) is not None, \
+                f"Field names (`sql_item`: {sql_item}) must be pure, not an " + \
+                "expression if attaching a dimension table."
+
+        if verbose:
+            if sql_item.find('{alias') < 0:
+                warn(f"No table alias placeholder found for {item} " + \
+                     "(expecting e.g. '{alias}field_name')")
+            if not (None in transformations):
+                warn("None not found in transformations: therefore you will be " + \
+                     "unable to select the raw field.")
+            if not (None in aggregations):
+                warn("None not found in aggregations: therefore you will be " + \
+                     "unable to select the raw field.")
 
         self.item = item
         self.sql_item = sql_item
@@ -31,23 +64,48 @@ class UserOption:
         self.context = context
         self.transformations = [None if t is None else t.lower() for t in transformations]
         self.default_transformation = default_transformation
-        self.table = table if isinstance(table, SchemaNode) else table.title()
-        self._set_transform_type(default_transformation)
         self.selected_transform = default_transformation
 
-    def _set_transform_type(self, t):
-        self.is_transformation, self.is_aggregation = False, False
-        if t in self.context.TRANSFORMATIONS:
-            self.is_transformation = True
-        elif t in self.context.AGGREGATIONS:
-            self.is_aggregation = True
+        self.aggregations = [None if t is None else t.lower() for t in aggregations]
+        self.default_aggregation = default_aggregation
+        self.selected_aggregation = default_aggregation
+        self.table = table if isinstance(table, SchemaNode) else table.title()
+        self.dimension_table = dimension_table
+        self.perform_lkp = perform_lkp
+        self.sql_where = sql_where
 
-    def select_transform(self, t):
-        if t is not None:
-            assert t in self.transformations, f'{t} is invalid. Allowed=' + \
-                                              ','.join(self.transformations)
-        self._set_transform_type(t)
+        if dimension_table is not None:
+            if lkp_field is not None:
+                self.lkp_field = lkp_field
+            else:
+                assert self.dimension_table.default_lkp is not None, \
+                    f'{item} No `default_lkp` field in dimension table. You must supply' \
+                    + ' a `lkp_field` in the UserOption arguments.'
+                self.lkp_field = self.dimension_table.default_lkp
+
+    def set_transform(self, t):
+        # if t is not None:
+        assert t in self.transformations, f'{t} is an invalid transformation. ' + \
+                                          'Allowed=' + ','.join(self.transformations)
         self.selected_transform = t
+
+    def set_aggregation(self, a):
+        # if a is not None:
+        assert a in self.aggregations, f'{a} is an invalid aggregation. Allowed=' + \
+                                          ','.join(self.aggregations)
+        self.selected_aggregation = a
+
+    @property
+    def has_transformation(self):
+        return self.selected_transform is not None
+
+    @property
+    def has_aggregation(self):
+        return self.selected_aggregation is not None
+
+    @property
+    def has_dim_lkp(self):
+        return self.dimension_table is not None
 
     def validate(self):
         if self.table == 'Custom':
@@ -59,98 +117,110 @@ class UserOption:
             return '(\n' + self.context.custom_tables[self.item] + '\n)'
         return self.table
 
+    def __copy__(self):
+        obj = type(self).__new__(self.__class__)
+        obj.__dict__.update(self.__dict__)
+        return obj
 
-class UserOptionAggregation(UserOption):
+    def copy(self):
+        return copy.copy(self)
 
-    def __init__(self, item, sql_item, transformations, default_transformation, table,
-                 context, field_alias=None):
-        # assert all([t.lower() in context.AGGREGATIONS for t in transformations]), \
-        #     "Please ensure the transformations are a subset of (" + \
-        #     ", ".join(context.AGGREGATIONS) + ")."
-        super().__init__(item, sql_item, transformations, default_transformation, table,
-                         context, field_alias=field_alias)
+    def sql_transform(self, alias=None, dialect="MSSS", coalesce=None):
+        """
+        A kind of look-up table for transformations such as 'MIN', 'AVG', 'YEAR',
+        'IS NOT NULL'...
+
+        This function creates the necessary transformation in the SELECT statement
+        and possibly a WHERE clause too, hence the `sel`, `where` variables.
+
+        The return value is the tuple (`sel`, `where`).
+
+        """
+
+        assert isinstance(self, UserOption), "opt is not a UserOption"
+
+        alias = '' if (alias is None or len(alias) == 0) else alias + '.'
+        if not self.perform_lkp:
+            name, table = self.sql_item, self.table
+        else:
+            name, table = self.lkp_field, self.dimension_table
+            name = '{alias:s}' + name
+        name = name.format(alias=alias)
+        datefield = self.table.primary_date_field
 
 
-class UserOptionSplit(UserOption):
+        dialect = dialect.lower()
+        assert dialect in ["msss",
+                           "postgres"], "dialect must be 'MSSS' (SQL Server) or 'Postgres'"
 
-    def __init__(self, item, sql_item, table, context, field_alias=None, sql_where=None,
-                 transformations=[], default_transformation=None, as_english=False):
-        assert all([t.lower() in context.TRANSFORMATIONS for t in transformations]), \
-            "Please ensure the transformations are a subset of (" + \
-            ", ".join(context.TRANSFORMATIONS) + ")."
-        super().__init__(item, sql_item, transformations, default_transformation, table,
-                         context, field_alias=field_alias)
-        self.sql_where = sql_where
-        self.as_english = as_english
+        where = ''
+        sel = f'{name}'
+        # _____________________ TRANSFORMATION _________________________________________
+
+        if self.has_transformation:
+            t = self.selected_transform.lower().strip()
+            if t == 'not null':
+                sel = f'CASE WHEN {name:s} IS NOT NULL THEN 1 ELSE 0 END'
+            elif t in ['day', 'month', 'year']:
+                if dialect == 'msss':
+                    sel = f'{t.upper()}({name:s})'
+                elif dialect == 'postgres':
+                    sel = f'EXTRACT({t.upper()} FROM {name:s})'
+                else:
+                    raise Exception("Unreachable Error")
+            elif t == 'week':
+                if dialect == 'msss':
+                    sel = f'DATEADD({name:s}, (DATEDIFF({name:s}, 0, GETDATE()) / 7) * 7 + 7, 0)'
+                elif dialect == 'postgres':
+                    sel = f'{name:s} - CAST(EXTRACT(DOW FROM {name:s}) AS INT) + 1'
+                else:
+                    raise Exception("Unreachable Error")
+            elif t == 'first':
+                assert table.num_parents() < 2, "can only use 'first' on tables which join to the Person table."
+                sel = f'{name:s}'
+                where = 'ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY {datefield:s}) = 1'
+            elif t == 'tens':
+                if dialect == 'msss':
+                    sel = f"CAST((({name}) / 10)*10 AS VARCHAR) + '-' +\n" + " "*10 + \
+                          f"CAST((({name}) / 10)*10+9 AS VARCHAR)"
+                elif dialect == 'postgres':
+                    sel = f"CONCAT(CAST(({name} / 10)*10 AS VARCHAR), '-', CAST(({name} / 10)*10+9 AS VARCHAR))"
+                else:
+                    raise Exception("Unreachable Error")
+            else:
+                raise KeyError(f'sql_transform: Unknown transformation: {t:s}')
+
+        # _____________________ AGGREGATION ____________________________________________
+        if self.has_aggregation:
+            a = self.selected_aggregation.lower().strip()
+            if a == 'rows':
+                sel = f'COUNT({sel})'
+            elif a == 'count':
+                sel = f'COUNT(DISTINCT {sel})'
+            else:
+                if self.verbose:
+                    warn(f'Aggregation {a} is not explicitly plumbed in. ' +
+                         f'Trying {a.upper()}')
+                sel = '{:s}({:s})'.format(a.upper(), sel)
+
+        # _____________________ Get field alias ________________________________________
+        if self.field_alias is None:
+            field_alias = str_to_fieldname(self.item)
+            field_alias += '_id' if (self.has_dim_lkp and not self.perform_lkp) else ''
+        else:
+            field_alias = self.field_alias
+        if self.has_aggregation and self.field_alias is None:
+            field_alias = self.selected_aggregation.lower().strip() + '_' + field_alias
+
+        # ________________ Coalesce with default (if left join) _______________________
+        if coalesce is not None:
+            sel = f"COALESCE({sel}, '{coalesce}')"
+
+        sel += f' AS {field_alias}'
+        return sel, where
 
 
 class UserOptionCompound(UserOption):
     pass
 
 # e.g. discharge type including death and C19 status.
-
-
-def sql_transform(opt, alias=None, dialect="MSSS"):
-    """
-    A kind of look-up table for transformations such as 'MIN', 'AVG', 'YEAR',
-    'IS NOT NULL'...
-
-    This function creates the necessary transformation in the SELECT statement
-    and possibly a WHERE clause too, hence the `sel`, `where` variables.
-
-    The return value is the tuple (`sel`, `where`).
-
-    """
-
-    assert isinstance(opt, UserOption), "opt is not a UserOption"
-    alias = '' if (alias is None or len(alias) == 0) else alias + '.'
-
-    name, table, datefield = opt.sql_item, opt.table, opt.table.primary_date_field
-    name_no_tbl_alias = name.format(alias='')
-    name = name.format(alias=alias)
-
-    if opt.selected_transform is None:
-        sel = f'{name}' if opt.field_alias is None else f"{name} AS {opt.field_alias}"
-        # if opt.as_english:
-        #     sel = f'{name}' if opt.field_alias is None else f"{name} AS {opt.field_alias}"
-        # else:
-        #     sel = f'{name}' if opt.field_alias is None else f"{name} AS {opt.field_alias}"
-        return sel, ''
-
-    dialect = dialect.lower()
-    assert dialect in ["msss", "postgres"], "dialect must be 'MSSS' (SQL Server) or 'Postgres'"
-
-    where = ''
-    t = opt.selected_transform.lower().strip()
-    field_alias = opt.field_alias if opt.field_alias is not None else name_no_tbl_alias
-    if opt.is_aggregation:
-        sel = "{:s}({:s}) AS {:s}".format(t.upper(), name, field_alias)
-    elif opt.is_transformation:
-        if t == 'not null':
-            sel = f'CASE WHEN {name:s} IS NOT NULL THEN 1 ELSE 0 AS {field_alias}'
-        elif t in ['day', 'month', 'year']:
-            if dialect == 'msss':
-                sel = f'{t.upper()}({name:s}) AS {field_alias}'
-            elif dialect == 'postgres':
-                sel = f'EXTRACT({t.upper()} FROM {name:s}) AS {field_alias}'
-            else:
-                raise Exception("Unreachable Error")
-        elif t == 'week':
-            if dialect == 'msss':
-                sel = f'DATEADD({name:s}, (DATEDIFF({name:s}, 0, GETDATE()) / 7) * 7 + 7, 0)'\
-                        + f' AS {field_alias}'
-            elif dialect == 'postgres':
-                sel = f'{name:s} - CAST(EXTRACT(DOW FROM {name:s}) AS INT) + 1 AS'\
-                        + f' {field_alias}'
-            else:
-                raise Exception("Unreachable Error")
-        elif t == 'first':
-            assert table.num_parents() < 2, "can only use 'first' on tables which join to the Person table."
-            sel = f'ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY {datefield:s}) AS rn, {name:s}'
-            where = 'rn = 1'
-        else:
-            raise KeyError(f'sql_transform: Unknown transformation: {t:s}')
-    else:
-        raise KeyError(f'Transformation not in list: {t:s}')
-
-    return sel, where
