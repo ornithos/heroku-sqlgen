@@ -1,10 +1,9 @@
+import sys; sys.path.append('./pySQLGen')
+
 import dash
 import dash_core_components as dcc
 import dash_html_components as html
 from dash.dependencies import Input, Output, State
-
-import sys
-sys.path.append("./pySQLGen")
 from pysqlgen.apputils import app_state_to_opts
 
 # --------- "GLOBALS" -------------------------------------------------
@@ -23,7 +22,7 @@ import example
 primary_fields = example.opts_aggregation
 primary_fields[0].set_aggregation('count')
 secondary_fields = example.opts_split
-debug_ui = False
+debug_ui = True
 print("BEGIN")
 
 # --------- DEFINE INPUT ----------------------------------------------
