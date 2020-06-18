@@ -1,14 +1,5 @@
-from .dbtree import SchemaNode
 import re
-
-
-def is_node(x, allow_custom=False):
-    if isinstance(x, SchemaNode):
-        return True
-    elif allow_custom and isinstance(x, str):
-        return x.lower() == "custom"
-    else:
-        return False
+import time
 
 
 def node_isin_context(x, context, allow_custom=False, allow_None=False):
@@ -51,6 +42,14 @@ def sync_index(i, cur_list, dest_list, None_is_str=False):
     return dest_list.index(cur_item)
 
 
+def flatten(l):
+    return [item for sublist in l for item in sublist]
+
+
+def not_none(*args):
+    return next((el for el in args if el is not None), None)
+
+
 def get_nth_chunk(n, indexable, chunksizes):
     chunk_start = sum(chunksizes[:n])
     chunk_end = chunk_start + chunksizes[n]
@@ -59,3 +58,7 @@ def get_nth_chunk(n, indexable, chunksizes):
 
 def rm_alias_placeholder(x):
     return re.sub('{alias(:s)?}', '', x)
+
+
+def cur_time_ms():
+    return int(round(time.time() * 1000))
