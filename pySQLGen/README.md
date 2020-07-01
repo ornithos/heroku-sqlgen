@@ -1,29 +1,22 @@
 ## PySQLGen
 
-A stump of a project to generate (fairly straightforward) SQL for a given schema. This is a sketch of an effort that may be useful for the [DECOVID](https://www.decovid.org/) project, and is currently being tested on data following the [OMOP schema](https://ohdsi.github.io/TheBookOfOhdsi/CommonDataModel.html).
+[![Heroku](http://heroku-badge.herokuapp.com/?app=sqlgen&style=flat&svg=1&root=index.html)](https://sqlgen.herokuapp.com/)
 
-Currently support:
+(Heroku is on an unpaid tier and may be asleep -- please refresh after 10-20s if the above badge is unavailable.)
 
-* Star schema data models.
-* Automatic model traversal / JOIN conditions from selected fields.
-* Basic aggregations.
-* Basic transformations.
+This project generates a subset of SQL for a given schema. It's been developed to support the [DECOVID](https://www.decovid.org/) project, and is currently being tested on data following the [OMOP schema](https://ohdsi.github.io/TheBookOfOhdsi/CommonDataModel.html). I make no claims of correctness or intuitiveness for more general schema. See the [`heroku`](www.heroku.com) deployment (above) for an example.
 
-Imminent support expected for:
+The intended use for the generated SQL is flexible aggregations for data visualisation as in e.g. dashboards. The high level 'language' or specification requires the user to specify:
 
-* Automatic joins to Dimension tables where user requests an 'English translation'.
-* Subqueries for 'inner aggregations' of a particular field.
-* Custom table/CTE definitions (supplied by user)
+* one or more fields (from arbitrary tables), with one being specified as the *primary* field.
+    * The table of the primary field is considered the root of the query tree, and aggregations on this table will be performed last.
+* any transformations from a prespecified list (see the [`db_fields.yaml`](db_fields.yaml) file.
+* any aggregations from a prespecified list (see the [`db_fields.yaml`](db_fields.yaml) file.
+* The query tree will be constructed automatically from the relationships between the tables specified (for current specification, see the [`decovid.py`](decovid.py) file).
+* Any aggregations required prior to the root table will occur within Common Table Expressions.
 
-Expected support for:
+There is no guarantee of optimality of the query -- primary keys are used in order to calculate the joins, but no table constraints are used.
 
-* Caching results to disk for use in a multi-user environment.
-
-Known issues:
-
-* JOINs will not necessarily follow the shortest path, as the code currently makes no use of constraints. That is a much more heavyweight implementation than I am intending. Hopefully the query optimizer should remove much of the pain here.
-* No attempt is being made for optimality e.g. by refactoring queries to make optimal use of PKs etc.
-* "AS..." aliases retained in the GROUP BY clause. (TO BE FIXED)
-
+### Early screenshot of Dash-based UI
 
 ![Screenshot](assets/screenshot.png)

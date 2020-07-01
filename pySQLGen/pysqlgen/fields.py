@@ -1,7 +1,8 @@
 import copy
+import yaml
+from warnings import warn
 from .utils import *
 from .dbtree import *
-from warnings import warn
 
 
 class UserOption:
@@ -25,10 +26,6 @@ class UserOption:
             "Please ensure the table is a SchemaNode object or the string 'custom'."
         assert node_isin_context(table, context, allow_custom=True), \
             f"Specified table '{table}' is not available in 'context'."
-        assert in_list(default_transformation, transformations, allow_None=True),\
-            "default transformation must be in list of possible transformations."
-        assert in_list(default_aggregation, aggregations, allow_None=True), \
-            "default aggregation must be in list of possible aggregations."
         assert node_isin_context(dimension_table, context, allow_None=True), \
             f"Specified dimension table '{table}' is not available in 'context'."
 
@@ -67,17 +64,23 @@ class UserOption:
         self.verbose = verbose
 
         self.transformations = [None if t is None else t.lower() for t in transformations]
-        self.default_transformation = default_transformation
-        self.selected_transform = default_transformation
+        _def_trans = default_transformation if default_transformation in \
+                                               self.transformations \
+                                            else self.transformations[0]
+        self.default_transformation = _def_trans
+        self.selected_transform = None  # to keep linter happy
+        self.set_transform(_def_trans)
 
         self.aggregations = [None if t is None else t.lower() for t in aggregations]
         self.default_aggregation = default_aggregation
-        self.selected_aggregation = default_aggregation
+        self.selected_aggregation = None  # to keep linter happy
+        self.set_aggregation(default_aggregation)
 
         self.table = table if isinstance(table, SchemaNode) else table.title()
         self.dimension_table = dimension_table
         self._perform_lkp = perform_lkp
         self.dim_where = dim_where
+        self.coalesce = None
 
         if dimension_table is not None:
             if lkp_field is not None:
@@ -89,15 +92,18 @@ class UserOption:
                 self.lkp_field = self.dimension_table.default_lkp
 
     def set_transform(self, t):
-        # if t is not None:
+        # if self.transformations is None:
+        #     raise Exception(f"Cannot apply transform: None are allowed for {self.item}")
         assert t in self.transformations, f'{t} is an invalid transformation. ' + \
-                                          'Allowed=' + ','.join(self.transformations)
+                                          'Allowed=' + \
+                                          ','.join([str(s) for s in self.transformations])
         self.selected_transform = t
 
     def set_aggregation(self, a):
-        # if a is not None:
+        # if self.aggregations is None:
+        #     raise Exception(f"Cannot apply aggregation: None allowed for {self.item}")
         assert a in self.aggregations, f'{a} is an invalid aggregation. Allowed=' + \
-                                          ','.join(self.aggregations)
+                                          ','.join([str(s) for s in self.aggregations])
         self.selected_aggregation = a
 
     @property
@@ -171,28 +177,37 @@ class UserOption:
 
     @property
     def field_alias(self):
-        if self._field_alias is None:
-            field_alias = str_to_fieldname(self.item)
-            field_alias += '_id' if (self.has_dim_lkp and not self.perform_lkp) else ''
-        else:
-            field_alias = self._field_alias
-        if self.has_aggregation and self._field_alias is None:
-            agg_prefix = self.selected_aggregation.lower().strip()
-            agg_prefix = self.context.agg_alias_lkp.get(agg_prefix, agg_prefix)
-            field_alias = agg_prefix + '_' + field_alias
-        return field_alias
+        return self._field_alias_logic(will_perform_lkp=self.perform_lkp)
 
     @field_alias.setter
     def field_alias(self, value):
         self._field_alias = value
 
-    def __copy__(self):
+    def _field_alias_logic(self, will_perform_lkp=True, depend_agg=True):
+        if self._field_alias is None:
+            field_alias = str_to_fieldname(self.item)
+            field_alias += '_id' if (self.has_dim_lkp and not will_perform_lkp) else ''
+        else:
+            field_alias = self._field_alias
+        if depend_agg and self.has_aggregation and self._field_alias is None:
+            agg_prefix = self.selected_aggregation.lower().strip()
+            agg_prefix = self.context.agg_alias_lkp.get(agg_prefix, agg_prefix)
+            field_alias = agg_prefix + '_' + field_alias
+        return field_alias
+
+    @property
+    def sql_fieldname(self):
+        return rm_alias_placeholder(self.sql_item)
+
+    def __copy__(self, set_item_name=None):
         obj = type(self).__new__(self.__class__)
         obj.__dict__.update(self.__dict__)
+        if set_item_name:
+            obj.item = set_item_name
         return obj
 
-    def copy(self):
-        return copy.copy(self)
+    def copy(self, set_item_name=None):
+        return self.__copy__(set_item_name=set_item_name)
 
     def __repr__(self):
         return f'UserOption({hex(id(self))}, {self.item}, tf={self.selected_transform}, ' + \
@@ -285,7 +300,8 @@ class UserOption:
 
         # ________________ Coalesce with default (if left join) _______________________
         if coalesce is not None:
-            sel = f"COALESCE({sel}, '{coalesce}')"
+            coalesce = f"'{coalesce}'" if isinstance(coalesce, str) else str(coalesce)
+            sel = f"COALESCE({sel}, {coalesce})"
 
         if self._field_alias != '':
             sel += f' AS {self.field_alias}'
@@ -296,3 +312,51 @@ class UserOptionCompound(UserOption):
     pass
 
 # e.g. discharge type including death and C19 status.
+
+
+def read_all_fields_from_yaml(filename, context, tbl_lkp, dim_lkp_where=None):
+    with open(filename, "r") as f:
+        fields_data = yaml.load(f, Loader=yaml.CLoader)
+
+    all_fields = dict()
+    for tbl_nm, tbl in tbl_lkp.items():
+        items_in_tbl = fields_data.get(tbl_nm, [])
+        if len(items_in_tbl) == 0:
+            # No items for Table in YAML file.
+            continue
+        for field_nm, payload in items_in_tbl.items():
+            if (len(payload) == 5) and payload[4] is not None:
+                # IGNORE
+                continue
+            stmt = payload[0]
+            has_transforms = (len(payload) > 1) and (payload[1] is not None)
+            transformations = payload[1] if has_transforms else [None]
+            has_aggregations = (len(payload) > 2) and (payload[2] is not None)
+            aggregations = payload[2] if has_aggregations else [None]
+            if len(payload) > 3:
+                lkp_tbl, lkp_def, lkp_where = payload[3]
+                lkp_tbl = tbl_lkp[lkp_tbl]
+                if lkp_where is not None and lkp_where[0] == '$':
+                    assert dim_lkp_where is not None, "dim_lkp_where must be specified."
+                    lkp_where = dim_lkp_where[lkp_where[1:]]
+            else:
+                lkp_tbl, lkp_def, lkp_where = None, False, None
+            field = UserOption(field_nm, stmt, tbl, context,
+                               transformations=transformations,
+                               aggregations=aggregations,
+                               dimension_table=lkp_tbl,
+                               perform_lkp=lkp_def,
+                               dim_where=lkp_where)
+            all_fields[field_nm] = field
+
+    return all_fields
+
+
+def construct_simple_field(name, table, context, is_secondary=True):
+    return UserOption(name, '{alias}'+name, table, context,
+                      transformations=[None],
+                      aggregations=[None],
+                      dimension_table=None,
+                      perform_lkp=False,
+                      dim_where=None,
+                      is_secondary=is_secondary)

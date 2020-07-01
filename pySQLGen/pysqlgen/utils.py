@@ -1,5 +1,7 @@
 import re
 import time
+from functools import reduce
+from collections import OrderedDict
 
 
 def node_isin_context(x, context, allow_custom=False, allow_None=False):
@@ -20,7 +22,8 @@ def in_list(x, L, allow_None=False):
 
 
 def str_to_fieldname(x):
-    return x.strip().replace(' ', '_')
+    name_rep = x.strip().replace(' ', '_').replace('(', '_').replace(')', '_')
+    return re.sub("(__+)", "_", name_rep).rstrip('_')
 
 
 def make_unique_name(x, *existing_names):
@@ -46,6 +49,10 @@ def flatten(l):
     return [item for sublist in l for item in sublist]
 
 
+def ilen(iterable):
+    return reduce(lambda sum, element: sum + 1, iterable, 0)
+
+
 def not_none(*args):
     return next((el for el in args if el is not None), None)
 
@@ -62,3 +69,13 @@ def rm_alias_placeholder(x):
 
 def cur_time_ms():
     return int(round(time.time() * 1000))
+
+
+def replace_in_ordered_dict(od, replace_key, key, value):
+    """
+    Overwrite a key in an OrderedDict while maintaining the original order.
+    This function will insert the (key, value) pair into the current position where
+    the `replace_key` sits.
+    """
+    return OrderedDict((key, value) if k == replace_key else (k, v)
+                       for k, v in od.items())
