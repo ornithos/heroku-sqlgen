@@ -1,30 +1,34 @@
 import yaml, json
 from collections import OrderedDict
 from pysqlgen.dbtree import *
-from pysqlgen.fields import UserOption
+from pysqlgen.fields import *
+from pysqlgen.query import construct_query
 
 # ########################## OBJECTS REFLECTING DATABASE ##############################
 # ~~~~~~~~~~~~~~~~~~~~ Define Schema ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Person = SchemaNode('Person', None, 'person_id',
-                    ['Visit_Detail', 'Visit_Occurrence',
-                     'Death', 'Measurement'],
+Person = SchemaNode('Person', [], ['person_id'],
                     ['person_id'], None)
-Visit_Detail = SchemaNode('Visit_Detail', Person, 'visit_detail_id',
-                          ['Care_Site'],
-                          ['care_site_id', 'person_id'],
-                          'visit_start_date')
-Care_Site = SchemaNode('Care_Site', Visit_Detail, 'care_site_id', [], [], None,
+Visit_Occurrence = SchemaNode('Visit_Occurrence', [Person],
+                              ['visit_occurrence_id', 'person_id'],
+                              [], 'visit_start_datetime')
+Visit_Detail = SchemaNode('Visit_Detail', [Visit_Occurrence, Person],
+                          ['visit_detail_id', 'visit_occurrence_id', 'person_id'],
+                          ['care_site_id'], 'visit_start_date')
+Care_Site = SchemaNode('Care_Site', [Visit_Detail], ['care_site_id'], [], None,
                        default_lkp='care_site_name')
-Visit_Occurrence = SchemaNode('Visit_Occurrence', Person, 'visit_occurrence_id',
-                              [], ['person_id'],
-                              'visit_start_datetime')
-Death = SchemaNode('Death', Person, 'person_id', [], [], 'death_date')
-Measurement = SchemaNode('Measurement', Person, 'person_id', [], [],
-                         'measurement_datetime')
+Death = SchemaNode('Death', [Person], ['person_id'], [], 'death_date')
+Measurement = SchemaNode('Measurement', [Visit_Detail, Visit_Occurrence, Person],
+                         ['person_id', 'visit_occurrence_id', 'visit_detail_id'],
+                         [], 'measurement_datetime')
+Drug_Exposure = SchemaNode('Drug_Exposure', [Visit_Detail, Visit_Occurrence, Person],
+                           ['person_id', 'visit_occurrence_id', 'visit_detail_id'],
+                           [], 'drug_exposure_start_datetime')
 
-Concept = SchemaNode('Concept', None, 'concept_id', [], ['concept_id'], None,
+Concept = SchemaNode('Concept', [], ['concept_id'], ['concept_id'], None,
                      default_lkp='concept_name')
-nodes = [Person, Visit_Detail, Care_Site, Visit_Occurrence, Death, Measurement, Concept]
+nodes = [Person, Visit_Detail, Care_Site, Visit_Occurrence, Death, Measurement,
+         Drug_Exposure, Concept]
+node_lkp = {n.name: n for n in nodes}
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # ~~~~~~~~~~~~~~~~~~~~ Custom Tables ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -49,49 +53,61 @@ coalesce_default = 'Unknown'       # 'NULL' value representation.
 context = DBMetadata(nodes, custom_tables, schema, AGGREGATIONS, TRANSFORMATIONS,
                      coalesce_default=coalesce_default, agg_alias_lkp=agg_name_alias)
 
+# ############################ GET ALL QUERY FIELDS #####################################
 
-# ################################# QUERY FIELDS #######################################
+dim_lkp_where = dict()
+dim_lkp_where['standard'] = "{alias:s}standard_concept = 'S'"
 
-with open("select_statements.yaml", "r") as f:
-    select_fragments = yaml.load(f, Loader=yaml.CLoader)
+# Read all field definitions (incl transforms/aggs/lkps) from YAML file.
+all_fields = read_all_fields_from_yaml("db_fields.yaml", context, tbl_lkp=node_lkp,
+                                       dim_lkp_where=dim_lkp_where)
 
-# Define options for user selection
+
+# Create options for primary variable
+# -------------------------------------------------------------------------
+
 opts_primary = (
-    UserOption('person', '{alias:s}person_id', Person, context,
-               aggregations=[None, 'rows', 'count'], default_aggregation='count'),
-    UserOption('measurement_types', '{alias:s}measurement_concept_id', Measurement,
-               context, aggregations=[None, 'rows', 'count']),
-    # UserOption('length_of_stay', '{alias:s}length_of_stay', 'custom', context,
-    #            aggregations=[None, 'avg']),
+    all_fields['person_id'].copy(set_item_name='person'),
+    all_fields['measurement_type'].copy(set_item_name='measurement type')
 )
 
-standard_concept = "{alias:s}standard_concept = 'S'"   # WHERE clause for CONCEPT table
-opts_split = (
-    UserOption('age', '2020 - {alias:s}year_of_birth', Person, context,
-               transformations=[None, 'Tens'], field_alias='age'),
-    UserOption('sex', '{alias:s}gender_concept_id', Person, context,
-               dimension_table=Concept, perform_lkp=True, dim_where=standard_concept),
-    UserOption('race', '{alias:s}race_concept_id', Person, context,
-               dimension_table=Concept, perform_lkp=True, dim_where=standard_concept),
-    UserOption('visit type', '{alias:s}visit_concept_id',
-               Visit_Occurrence, context,
-               dimension_table=Concept, perform_lkp=True, dim_where=standard_concept),
-    UserOption('admission type', '{alias:s}admitting_source_concept_id',
-               Visit_Occurrence, context,
-               dimension_table=Concept, perform_lkp=True, dim_where=standard_concept),
-    UserOption('discharge type', '{alias:s}discharge_to_concept_id',
-               Visit_Occurrence, context,
-               dimension_table=Concept, perform_lkp=True, dim_where=standard_concept),
-    UserOption('visit start date', '{alias:s}visit_start_datetime', Visit_Occurrence,
-               context, aggregations=[None, 'rows']),
-    UserOption('length of stay', select_fragments['length_of_stay'], Visit_Occurrence,
-               context, aggregations=[None, 'avg']),
-    UserOption('care site', '{alias:s}care_site_id', Visit_Detail, context,
-               dimension_table=Care_Site, perform_lkp=True),
-    UserOption('death', '{alias:s}death_date', Death, context,
-               transformations=['not null', 'day', 'week', 'month'],
-               default_transformation='week'),
-)
+
+# Create options for secondary variables
+# -------------------------------------------------------------------------
+
+opts_secondary = [
+    all_fields['age'].copy(),
+    all_fields['sex'].copy(),
+    all_fields['race'].copy(),
+    all_fields['visit_type'].copy(set_item_name='visit type'),
+    all_fields['admission_type'].copy(set_item_name='admission type'),
+    all_fields['visit_start_date'].copy(set_item_name='visit start date'),
+    all_fields['length_of_stay_visit'].copy(set_item_name='length of stay (visit)'),
+    all_fields['length_of_stay_detail'].copy(set_item_name='length of stay (detail)'),
+    all_fields['care_site'].copy(set_item_name='care site'),
+    all_fields['death'],
+    all_fields['measurement_type'].copy(set_item_name='measurement type'),
+]
+
+
+# ############################## DEFAULTS ###############################################
+
+default_transformations = dict()
+default_aggregations = dict()
+default_transformations['death'] = ['week', 'secondary']
+
+for i, opts in enumerate([opts_primary, opts_secondary]):
+    for opt in opts:
+        if opt.item in default_transformations:
+            trans = default_transformations[opt.item]
+            if trans[1] != ['primary', 'secondary'][i]:
+                continue
+            opt.set_transform(trans[0])
+        if opt.item in default_aggregations:
+            agg = default_aggregations[opt.item]
+            if agg[1] != ['primary', 'secondary'][i]:
+                continue
+            opt.set_aggregation(agg[0])
 
 
 # ############################## STANDARD QUERIES ########################################
@@ -100,8 +116,14 @@ opts_split = (
 with open("standard_queries.json", 'r') as f:
     standard_queries = json.JSONDecoder(object_pairs_hook=OrderedDict).decode(f.read())
 
-# agg_opt = opts_aggregation[0]
-# agg_opt.set_aggregation('count')
-# tmp = construct_query(agg_opt, opts_split[0], *opts_split[1:])
-# print(tmp)
 
+if __name__ == "__main__":
+    agg_opt = opts_primary[0]
+    agg_opt.set_aggregation('count')
+    _opts = opts_secondary[6:8]
+    _opts[0].set_aggregation('avg')
+    _opts.append(opts_secondary[-3])
+    for o in _opts:
+        o.is_secondary=True
+    tmp = construct_query(agg_opt, *_opts)
+    print(tmp)
